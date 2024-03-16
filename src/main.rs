@@ -116,7 +116,7 @@ fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
 }
 
 fn read_metainfo(filepath: &str) -> Map<String, serde_json::Value> {
-    let content = std::fs::read(filepath).unwrap();
+    let content = std::fs::read(filepath).expect("Invalid file");
     let mut chars = content.iter();
     match chars.next() {
         Some(b'd') => _decode_bencoded_dictionary(&mut chars),
