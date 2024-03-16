@@ -141,7 +141,7 @@ fn main() {
             let filepath = &args[2];
             let dict = read_metainfo(filepath);
             println!(
-                "Track URL: {}",
+                "Tracker URL: {}",
                 dict.get("announce")
                     .expect("Missing `announce` key")
                     .as_str()
