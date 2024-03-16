@@ -1,8 +1,9 @@
 use serde_json::{self, Map};
+use sha1::{Digest, Sha1};
 use std::{env, slice::Iter};
 
 // Available if you need it!
-// use serde_bencode
+use serde_bencode;
 const DECODE_COMMAND: &str = "decode";
 const INFO_COMMAND: &str = "info";
 
@@ -147,15 +148,21 @@ fn main() {
                     .as_str()
                     .unwrap()
             );
+            let info_dict = dict
+                .get("info")
+                .expect("Missing `info` key")
+                .as_object()
+                .unwrap();
             println!(
                 "Length: {}",
-                dict.get("info")
-                    .expect("Missing `info` key")
-                    .as_object()
-                    .unwrap()
-                    .get("length")
-                    .expect("Missing `length` key")
+                info_dict.get("length").expect("Missing `length` key")
             );
+
+            let mut hasher = Sha1::new();
+            let encoded_info = serde_bencode::to_bytes(info_dict).unwrap();
+            hasher.update(encoded_info);
+            let result = hasher.finalize();
+            print!("Info Hash: {:x}", result)
         }
         _ => {
             println!("unknown command: {}", args[1])
