@@ -140,7 +140,13 @@ fn main() {
         INFO_COMMAND => {
             let filepath = &args[2];
             let dict = read_metainfo(filepath);
-            println!("Track URL: {}", dict.get("announce").unwrap());
+            println!(
+                "Track URL: {}",
+                dict.get("announce")
+                    .expect("Missing `announce` key")
+                    .as_str()
+                    .unwrap()
+            );
             println!(
                 "Length: {}",
                 dict.get("info")
