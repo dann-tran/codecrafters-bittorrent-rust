@@ -25,7 +25,7 @@ fn _decode_bencoded_integer(chars: &mut Iter<u8>) -> i64 {
     String::from_utf8(number_chars.into_iter().collect::<Vec<u8>>())
         .unwrap()
         .parse::<i64>()
-        .unwrap()
+        .expect("Invalid integer")
 }
 
 fn _decode_bencoded_string(c: u8, chars: &mut Iter<u8>) -> String {
