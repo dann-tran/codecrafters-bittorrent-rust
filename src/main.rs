@@ -144,11 +144,11 @@ fn main() {
             println!(
                 "Length: {}",
                 dict.get("info")
-                    .unwrap()
+                    .expect("Missing `info` key")
                     .as_object()
                     .unwrap()
                     .get("length")
-                    .unwrap()
+                    .expect("Missing `length` key")
             );
         }
         _ => {
