@@ -124,6 +124,13 @@ fn main() -> anyhow::Result<()> {
             let mut hasher = Sha1::new();
             hasher.update(bencoded_info);
             println!("Info Hash: {:x}", hasher.finalize());
+
+            println!("Piece Length: {}", torrent.info.piece_length);
+            println!("Piece Hashes:");
+            torrent.info.pieces.chunks_exact(20).for_each(|chunk| {
+                let chunk = chunk.iter().map(|b| format!("{:x}", b)).collect::<String>();
+                println!("{}", chunk);
+            })
         }
     }
     Ok(())
