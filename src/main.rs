@@ -1,14 +1,23 @@
+use clap::{Parser, Subcommand};
+use serde::Deserialize;
+use serde_bytes::ByteBuf;
 use serde_json::{self, Map};
-use sha1::{Digest, Sha1};
-use std::env;
+use std::path::PathBuf;
 
-// Available if you need it!
-// use serde_bencode;
-const DECODE_COMMAND: &str = "decode";
-// const INFO_COMMAND: &str = "info";
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    Decode { value: String },
+    Info { filepath: PathBuf },
+}
 
 fn _decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
-    eprintln!("Decoding {encoded_value}");
     match encoded_value.chars().next() {
         Some('i') => {
             // Example: "i52e" -> 52
@@ -80,57 +89,36 @@ fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
     return val;
 }
 
-fn read_metainfo(filepath: &str) -> Map<String, serde_json::Value> {
-    let content = std::fs::read(filepath).expect("Invalid file");
-    let mut chars = content.iter();
-    match chars.next() {
-        Some(b'd') => _decode_bencoded_dictionary(&mut chars),
-        Some(_) | None => {
-            panic!("Invalid metainfo")
-        }
-    }
+#[derive(Debug, Deserialize)]
+struct Info {
+    length: usize,
+    name: String,
+    #[serde(rename = "piece length")]
+    piece_length: usize,
+    pieces: ByteBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct Torrent {
+    announce: String,
+    info: Info,
 }
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let command = &args[1];
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
 
-    match command.as_str() {
-        DECODE_COMMAND => {
-            let encoded_value = &args[2];
-            let decoded_value = decode_bencoded_value(encoded_value);
+    match args.command {
+        Command::Decode { value } => {
+            let decoded_value = decode_bencoded_value(&value);
             println!("{}", decoded_value.to_string());
         }
-        INFO_COMMAND => {
-            let filepath = &args[2];
-            let dict = read_metainfo(filepath);
-            println!(
-                "Tracker URL: {}",
-                dict.get("announce")
-                    .expect("Missing `announce` key")
-                    .as_str()
-                    .unwrap()
-            );
-            let info_dict = dict
-                .get("info")
-                .expect("Missing `info` key")
-                .as_object()
-                .unwrap();
-            println!(
-                "Length: {}",
-                info_dict.get("length").expect("Missing `length` key")
-            );
-
-            let mut hasher = Sha1::new();
-            let encoded_info = serde_bencode::to_bytes(info_dict).unwrap();
-            hasher.update(encoded_info);
-            let result = hasher.finalize();
-            println!("Info Hash: {:x}", result)
+        Command::Info { filepath } => {
+            let content = std::fs::read(filepath)?;
+            let torrent = serde_bencode::from_bytes::<Torrent>(&content)?;
+            println!("Tracker URL: {}", torrent.announce);
+            println!("Length: {}", torrent.info.length);
         }
-        _ => {
-            println!("unknown command: {}", args[1])
-        }
-        _ => {}
     }
+    Ok(())
 }
