@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use serde_json::{self, Map};
+use sha1::{Digest, Sha1};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -89,7 +90,7 @@ fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
     return val;
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct Info {
     length: usize,
     name: String,
@@ -118,6 +119,11 @@ fn main() -> anyhow::Result<()> {
             let torrent = serde_bencode::from_bytes::<Torrent>(&content)?;
             println!("Tracker URL: {}", torrent.announce);
             println!("Length: {}", torrent.info.length);
+
+            let bencoded_info = serde_bencode::to_bytes(&torrent.info)?;
+            let mut hasher = Sha1::new();
+            hasher.update(bencoded_info);
+            println!("Info Hash: {:x}", hasher.finalize());
         }
     }
     Ok(())
