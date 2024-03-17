@@ -128,7 +128,10 @@ fn main() -> anyhow::Result<()> {
             println!("Piece Length: {}", torrent.info.piece_length);
             println!("Piece Hashes:");
             torrent.info.pieces.chunks_exact(20).for_each(|chunk| {
-                let chunk = chunk.iter().map(|b| format!("{:x}", b)).collect::<String>();
+                let chunk = chunk
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>();
                 println!("{}", chunk);
             })
         }
