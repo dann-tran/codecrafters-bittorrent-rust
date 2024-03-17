@@ -1,119 +1,83 @@
 use serde_json::{self, Map};
 use sha1::{Digest, Sha1};
-use std::{env, slice::Iter};
+use std::env;
 
 // Available if you need it!
-use serde_bencode;
+// use serde_bencode;
 const DECODE_COMMAND: &str = "decode";
-const INFO_COMMAND: &str = "info";
+// const INFO_COMMAND: &str = "info";
 
-fn _decode_bencoded_integer(chars: &mut Iter<u8>) -> i64 {
-    // Example: "(i)52e" -> 52
-    let mut number_chars: Vec<u8> = Vec::new();
-    loop {
-        match chars.next() {
-            Some(b'e') => {
-                break;
-            }
-            Some(&c) => {
-                number_chars.push(c);
-            }
-            None => {
-                panic!("Invalid bencoded integer")
+fn _decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
+    eprintln!("Decoding {encoded_value}");
+    match encoded_value.chars().next() {
+        Some('i') => {
+            // Example: "i52e" -> 52
+            if let Some((n, remainder)) =
+                (&encoded_value[1..])
+                    .split_once('e')
+                    .and_then(|(digits, remainder)| {
+                        // ok() converts Result<T, E> to Option<T>
+                        // ? causes the function the return None if None, else unwraps the value
+                        let n = digits.parse::<i64>().ok()?;
+                        Some((n, remainder))
+                    })
+            {
+                return (n.into(), remainder);
             }
         }
-    }
-    String::from_utf8(number_chars.into_iter().collect::<Vec<u8>>())
-        .unwrap()
-        .parse::<i64>()
-        .expect("Invalid integer")
-}
-
-fn _decode_bencoded_string(c: u8, chars: &mut Iter<u8>) -> String {
-    // Example: "5:hello" -> "hello"
-    let mut number_chars: Vec<u8> = vec![c];
-    loop {
-        match chars.next() {
-            Some(b':') => {
-                break;
-            }
-            Some(&c) if c.is_ascii_digit() => {
-                number_chars.push(c);
-            }
-            Some(_) | None => {
-                panic!("Invalid bencoded string")
+        Some(c) if c.is_ascii_digit() => {
+            // Example: "5:hello" -> "hello"
+            if let Some((string, remainder)) =
+                encoded_value
+                    .split_once(':')
+                    .and_then(|(digits, remainder)| {
+                        let n = digits.parse::<usize>().ok()?;
+                        Some((remainder[..n].to_string(), &remainder[n..]))
+                    })
+            {
+                return (string.into(), remainder);
             }
         }
-    }
-    let number_str = String::from_utf8(number_chars.into_iter().collect::<Vec<u8>>()).unwrap();
-    let number = number_str
-        .parse::<usize>()
-        .expect(format!("Invalid number: {}\n", number_str).as_str());
-    String::from_utf8_lossy(&chars.take(number).cloned().collect::<Vec<u8>>()).into_owned()
-}
-
-fn _decode_bencoded_list(chars: &mut Iter<u8>) -> Vec<serde_json::Value> {
-    // Example: "(l)5:helloi52ee" -> ["hello", 52]
-    let mut vec: Vec<serde_json::Value> = Vec::new();
-    loop {
-        match chars.next() {
-            Some(b'e') => {
-                break;
+        Some('l') => {
+            // Example: "l5:helloi52ee" -> ["hello", 52]
+            let mut values = Vec::new();
+            let mut remainder = &encoded_value[1..];
+            while !remainder.is_empty() && !remainder.starts_with('e') {
+                let (val, _remainder) = _decode_bencoded_value(remainder);
+                values.push(val);
+                remainder = _remainder;
             }
-            Some(&_c) => {
-                let val = _decode_bencoded_value(_c, chars);
-                vec.push(val);
-            }
-            None => {
-                panic!("Invalid bencoded list")
-            }
+            return (values.into(), &remainder[1..]);
         }
-    }
-    vec
-}
-
-fn _decode_bencoded_dictionary(chars: &mut Iter<u8>) -> Map<String, serde_json::Value> {
-    // Example: "(d)3:foo3:bar5:helloi52ee" -> {"hello": 52, "foo":"bar"}
-    let mut dict: Map<String, serde_json::Value> = Map::new();
-    loop {
-        match chars.next() {
-            Some(b'e') => {
-                break;
-            }
-            Some(&c) => {
-                let key = _decode_bencoded_string(c, chars);
-                let val = _decode_bencoded_value(*chars.next().unwrap(), chars);
+        Some('d') => {
+            // Example: "d3:foo3:bar5:helloi52ee" -> {"hello": 52, "foo":"bar"}
+            let mut dict = Map::new();
+            let mut remainder = &encoded_value[1..];
+            while !remainder.is_empty() && !remainder.starts_with('e') {
+                let (key, _remainder) = _decode_bencoded_value(remainder);
+                remainder = _remainder;
+                let (val, _remainder) = _decode_bencoded_value(remainder);
+                remainder = _remainder;
+                let key = match key {
+                    serde_json::Value::String(k) => k,
+                    k => panic!("Key must be a string, not {k:?}"),
+                };
                 dict.insert(key, val);
             }
-            None => {
-                panic!("Invalid dict")
-            }
+            return (dict.into(), &remainder[1..]);
         }
+        _ => {}
     }
-    dict
+    panic!("Unhandled encoded value")
 }
 
-fn _decode_bencoded_value(c: u8, chars: &mut Iter<u8>) -> serde_json::Value {
-    match c {
-        b'i' => serde_json::Value::Number(_decode_bencoded_integer(chars).into()),
-        _c if _c.is_ascii_digit() => serde_json::Value::String(_decode_bencoded_string(c, chars)),
-        b'l' => serde_json::Value::Array(_decode_bencoded_list(chars)),
-        b'd' => serde_json::Value::Object(_decode_bencoded_dictionary(chars)),
-        _ => {
-            panic!("Unhandled encoded value")
-        }
-    }
-}
-
-#[allow(dead_code)]
 fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
-    let mut chars = encoded_value.as_bytes().iter();
-    match chars.next() {
-        Some(&c) => _decode_bencoded_value(c, &mut chars),
-        None => {
-            panic!("Unhandled encoded value {}", encoded_value)
-        }
+    let (val, remainder) = _decode_bencoded_value(encoded_value);
+    if !remainder.is_empty() {
+        eprintln!("Extra remainder: {remainder}");
+        panic!("Invalid encoded value: {encoded_value}")
     }
+    return val;
 }
 
 fn read_metainfo(filepath: &str) -> Map<String, serde_json::Value> {
@@ -162,10 +126,11 @@ fn main() {
             let encoded_info = serde_bencode::to_bytes(info_dict).unwrap();
             hasher.update(encoded_info);
             let result = hasher.finalize();
-            print!("Info Hash: {:x}", result)
+            println!("Info Hash: {:x}", result)
         }
         _ => {
             println!("unknown command: {}", args[1])
         }
+        _ => {}
     }
 }
