@@ -1,10 +1,9 @@
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{arg, Parser, Subcommand};
 
 use bittorrent_starter_rust::{
-    decode::decode_bencoded_value,
-    torrent::Torrent,
-    tracker::{TrackerRequest, TrackerResponse},
+    decode::decode_bencoded_value, handshake::perform_handshake, torrent::Torrent,
+    tracker::request_tracker,
 };
 use std::path::PathBuf;
 use tokio::{
@@ -34,15 +33,12 @@ enum Command {
         filepath: PathBuf,
         peer_addr: String,
     },
-}
-
-fn urlencode(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(3 * bytes.len());
-    for &byte in bytes {
-        encoded.push('%');
-        encoded.push_str(&hex::encode(&[byte]));
-    }
-    encoded
+    // DownloadPiece {
+    //     #[arg(short)]
+    //     outpath: PathBuf,
+    //     filepath: PathBuf,
+    //     piece_index: usize,
+    // },
 }
 
 #[tokio::main]
@@ -74,36 +70,9 @@ async fn main() -> anyhow::Result<()> {
             let torrent = serde_bencode::from_bytes::<Torrent>(&content)
                 .context("Deserialize torrent file")?;
 
-            let tracker_req = TrackerRequest {
-                peer_id: String::from("00112233445566778899"),
-                port: 6881,
-                uploaded: 0,
-                downloaded: 0,
-                left: torrent.info.length,
-                compact: 1,
-            };
-            let url_params =
-                serde_urlencoded::to_string(&tracker_req).context("URL-encode TrackRequest")?;
-            let url = format!(
-                "{}?info_hash={}&{}",
-                &torrent.announce,
-                &urlencode(&torrent.info_hash()),
-                &url_params
-            );
-
-            let res = reqwest::get(&url).await?.bytes().await?;
-            let tracker_res = serde_bencode::from_bytes::<TrackerResponse>(&res)
-                .context("Parse TrackerResponse")?;
-
-            tracker_res.peers.chunks_exact(6).for_each(|chunk| {
-                println!(
-                    "{}.{}.{}.{}:{}",
-                    chunk[0],
-                    chunk[1],
-                    chunk[2],
-                    chunk[3],
-                    ((chunk[4] as u16) << 8 | chunk[5] as u16)
-                )
+            let tracker_res = request_tracker(&torrent).await?;
+            tracker_res.get_peers().iter().for_each(|ip_addr| {
+                println!("{}", ip_addr);
             })
         }
         Command::Handshake {
@@ -114,18 +83,70 @@ async fn main() -> anyhow::Result<()> {
             let torrent = serde_bencode::from_bytes::<Torrent>(&content)
                 .context("Deserialize torrent file")?;
 
-            let mut handshake = [0; 68];
-            handshake[0] = 19; // length of protocol string
-            handshake[1..20].copy_from_slice(b"BitTorrent protocol");
-            handshake[28..48].copy_from_slice(&torrent.info_hash());
-            handshake[48..68].copy_from_slice(b"00112233445566778899");
+            let mut tcp_stream = TcpStream::connect(&peer_addr).await?;
+            let peer_msg = perform_handshake(&torrent, &mut tcp_stream).await?;
+            println!("Peer ID: {}", hex::encode(&peer_msg.peer_id));
+        } // Command::DownloadPiece {
+          //     outpath,
+          //     filepath,
+          //     piece_index,
+          // } => {
+          //     let content = std::fs::read(filepath)?;
+          //     let torrent = serde_bencode::from_bytes::<Torrent>(&content)
+          //         .context("Deserialize torrent file")?;
 
-            let mut stream = TcpStream::connect(peer_addr).await?;
-            stream.write_all(&handshake).await?;
-            let mut res = [0; 68];
-            stream.read(&mut res).await?;
-            println!("Peer ID: {}", hex::encode(&res[48..]));
-        }
+          //     let tracker_res = request_tracker(&torrent).await?;
+          //     let peers = tracker_res.get_peers();
+          //     let peer_addr = &peers.iter().nth(0).context("Get peer addr")?;
+
+          //     let mut tcp_stream = TcpStream::connect(&peer_addr).await?;
+          //     let peer_msg = perform_handshake(&torrent, &mut tcp_stream).await?;
+
+          //     // receive bitfield
+          //     let msg = read_peer_message(&mut tcp_stream).await?;
+          //     assert_eq!(msg.id, b'5');
+
+          //     // send interested
+          //     let mut msg: [u8; 5] = [0; 5];
+          //     msg[4] = 2;
+          //     tcp_stream.write_all(&msg).await?;
+
+          //     tcp_stream.read_exact(&mut length).await?;
+          //     let msg_length = compute_4byte_int(&length);
+          //     let payload_length = msg_length - 5;
+
+          //     let mut payload = vec![0; payload_length];
+          //     tcp_stream.read_exact(&mut payload).await?;
+
+          //     // recieve unchoke
+          //     let id = tcp_stream.read_u8().await?;
+          //     assert_eq!(id, b'1');
+
+          //     const BLOCK_SIZE: usize = 2 << 14;
+          //     const REQUEST_MSG_LENGTH: usize = 4 + 1 + 4 + 4 + 4;
+          //     let piece: Vec<&[u8; BLOCK_SIZE]> = Vec::new();
+
+          //     for offset in (0..torrent.info.piece_length).step_by(BLOCK_SIZE) {
+          //         // send rqeuest
+          //         let mut msg: [u8; REQUEST_MSG_LENGTH] = [0; REQUEST_MSG_LENGTH];
+          //         msg[..4].copy_from_slice(&REQUEST_MSG_LENGTH.to_le_bytes()); // message length
+          //         msg[4] = 6; // message id
+          //         msg[5..9].copy_from_slice(&piece_index.to_le_bytes()); // piece index
+          //         msg[9..13].copy_from_slice(&offset.to_le_bytes()); // byte offset
+          //         let block_length =
+          //             std::cmp::min(offset + BLOCK_SIZE, torrent.info.piece_length) - offset;
+          //         msg[13..].copy_from_slice(&block_length.to_le_bytes()); // block length
+
+          //         tcp_stream.write_all(&msg).await?;
+
+          //         // receive piece
+
+          //         let id = tcp_stream.read_u8().await?;
+          //         assert_eq!(id, b'7');
+          //         let mut block: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+          //         tcp_stream.read_exact(&block).await?;
+          //     }
+          // }
     }
     Ok(())
 }

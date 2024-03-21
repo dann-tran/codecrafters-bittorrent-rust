@@ -7,7 +7,7 @@ pub struct Info {
     pub length: usize,
     pub name: String,
     #[serde(rename = "piece length")]
-    pub piece_length: usize,
+    pub piece_length: usize, // number of bytes in each piece
     pub pieces: ByteBuf,
 }
 
