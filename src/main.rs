@@ -2,14 +2,16 @@ use anyhow::Context;
 use clap::{arg, Parser, Subcommand};
 
 use bittorrent_starter_rust::{
-    decode::decode_bencoded_value, handshake::perform_handshake, torrent::Torrent,
+    decode::decode_bencoded_value,
+    handshake::perform_handshake,
+    message::{Message, MessageFramer, MessageTag, Piece, RequestPayload},
+    torrent::Torrent,
     tracker::request_tracker,
 };
+use futures_util::{SinkExt, StreamExt};
+use sha1::{Digest, Sha1};
 use std::path::PathBuf;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::net::TcpStream;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -19,6 +21,7 @@ struct Args {
 }
 
 #[derive(Subcommand, Debug)]
+#[clap(rename_all = "snake_case")]
 enum Command {
     Decode {
         value: String,
@@ -33,12 +36,12 @@ enum Command {
         filepath: PathBuf,
         peer_addr: String,
     },
-    // DownloadPiece {
-    //     #[arg(short)]
-    //     outpath: PathBuf,
-    //     filepath: PathBuf,
-    //     piece_index: usize,
-    // },
+    DownloadPiece {
+        #[arg(short)]
+        outpath: PathBuf,
+        filepath: PathBuf,
+        piece_index: usize,
+    },
 }
 
 #[tokio::main]
@@ -61,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 
             println!("Piece Length: {}", torrent.info.piece_length);
             println!("Piece Hashes:");
-            torrent.info.pieces.chunks_exact(20).for_each(|chunk| {
+            torrent.info.piece_hashes().iter().for_each(|chunk| {
                 println!("{}", hex::encode(chunk));
             })
         }
@@ -86,67 +89,109 @@ async fn main() -> anyhow::Result<()> {
             let mut tcp_stream = TcpStream::connect(&peer_addr).await?;
             let peer_msg = perform_handshake(&torrent, &mut tcp_stream).await?;
             println!("Peer ID: {}", hex::encode(&peer_msg.peer_id));
-        } // Command::DownloadPiece {
-          //     outpath,
-          //     filepath,
-          //     piece_index,
-          // } => {
-          //     let content = std::fs::read(filepath)?;
-          //     let torrent = serde_bencode::from_bytes::<Torrent>(&content)
-          //         .context("Deserialize torrent file")?;
+        }
+        Command::DownloadPiece {
+            outpath,
+            filepath,
+            piece_index,
+        } => {
+            let content = std::fs::read(filepath)?;
+            let torrent = serde_bencode::from_bytes::<Torrent>(&content)
+                .context("Deserialize torrent file")?;
 
-          //     let tracker_res = request_tracker(&torrent).await?;
-          //     let peers = tracker_res.get_peers();
-          //     let peer_addr = &peers.iter().nth(0).context("Get peer addr")?;
+            let tracker_res = request_tracker(&torrent).await?;
+            let peers = tracker_res.get_peers();
+            let peer_addr = &peers.iter().nth(0).context("Get peer addr")?;
+            let mut tcp_stream = TcpStream::connect(&peer_addr).await?;
+            perform_handshake(&torrent, &mut tcp_stream).await?;
 
-          //     let mut tcp_stream = TcpStream::connect(&peer_addr).await?;
-          //     let peer_msg = perform_handshake(&torrent, &mut tcp_stream).await?;
+            let mut framed = tokio_util::codec::Framed::new(tcp_stream, MessageFramer);
+            let bitfield = framed
+                .next()
+                .await
+                .expect("peer always sends a bitfields")
+                .context("peer message was invalid")?;
+            assert_eq!(bitfield.tag, MessageTag::Bitfield);
+            // NOTE: we assume that the bitfield covers all pieces
 
-          //     // receive bitfield
-          //     let msg = read_peer_message(&mut tcp_stream).await?;
-          //     assert_eq!(msg.id, b'5');
+            framed
+                .send(Message {
+                    tag: MessageTag::Interested,
+                    payload: Vec::new(),
+                })
+                .await
+                .context("send interested message")?;
 
-          //     // send interested
-          //     let mut msg: [u8; 5] = [0; 5];
-          //     msg[4] = 2;
-          //     tcp_stream.write_all(&msg).await?;
+            let unchoke = framed
+                .next()
+                .await
+                .expect("peer always sends an unchoke")
+                .context("peer message was invalid")?;
+            assert_eq!(unchoke.tag, MessageTag::Unchoke);
+            assert!(unchoke.payload.is_empty());
 
-          //     tcp_stream.read_exact(&mut length).await?;
-          //     let msg_length = compute_4byte_int(&length);
-          //     let payload_length = msg_length - 5;
+            let piece_size = if piece_index == torrent.info.pieces.chunks_exact(20).len() - 1 {
+                let size = torrent.info.length % torrent.info.piece_length;
+                if size == 0 {
+                    torrent.info.piece_length
+                } else {
+                    size
+                }
+            } else {
+                torrent.info.piece_length
+            };
+            let mut piece_bytes: Vec<u8> = Vec::with_capacity(piece_size);
+            for (block_index, offset) in (0..piece_size).step_by(1 << 14).enumerate() {
+                let block_size = std::cmp::min(&piece_size - offset, 1 << 14);
+                let mut req =
+                    RequestPayload::new(piece_index as u32, offset as u32, block_size as u32);
+                let request_bytes = Vec::from(req.as_bytes_mut());
+                framed
+                    .send(Message {
+                        tag: MessageTag::Request,
+                        payload: request_bytes,
+                    })
+                    .await
+                    .with_context(|| format!("send request for block {block_index}"))?;
 
-          //     let mut payload = vec![0; payload_length];
-          //     tcp_stream.read_exact(&mut payload).await?;
+                let piece = framed
+                    .next()
+                    .await
+                    .expect("peer always sends a piece")
+                    .context("peer message was invalid")?;
+                assert_eq!(piece.tag, MessageTag::Piece);
+                assert!(!piece.payload.is_empty());
 
-          //     // recieve unchoke
-          //     let id = tcp_stream.read_u8().await?;
-          //     assert_eq!(id, b'1');
+                let piece = Piece::ref_from_bytes(&piece.payload[..])
+                    .expect("always get all Piece response fields from peer");
+                assert_eq!(piece.index() as usize, piece_index);
+                assert_eq!(piece.begin() as usize, offset);
+                assert_eq!(piece.block().len(), block_size);
+                piece_bytes.extend(piece.block());
+            }
 
-          //     const BLOCK_SIZE: usize = 2 << 14;
-          //     const REQUEST_MSG_LENGTH: usize = 4 + 1 + 4 + 4 + 4;
-          //     let piece: Vec<&[u8; BLOCK_SIZE]> = Vec::new();
+            assert_eq!(piece_bytes.len(), piece_size);
 
-          //     for offset in (0..torrent.info.piece_length).step_by(BLOCK_SIZE) {
-          //         // send rqeuest
-          //         let mut msg: [u8; REQUEST_MSG_LENGTH] = [0; REQUEST_MSG_LENGTH];
-          //         msg[..4].copy_from_slice(&REQUEST_MSG_LENGTH.to_le_bytes()); // message length
-          //         msg[4] = 6; // message id
-          //         msg[5..9].copy_from_slice(&piece_index.to_le_bytes()); // piece index
-          //         msg[9..13].copy_from_slice(&offset.to_le_bytes()); // byte offset
-          //         let block_length =
-          //             std::cmp::min(offset + BLOCK_SIZE, torrent.info.piece_length) - offset;
-          //         msg[13..].copy_from_slice(&block_length.to_le_bytes()); // block length
+            let mut hasher = Sha1::new();
+            hasher.update(&piece_bytes);
+            let hash: [u8; 20] = hasher
+                .finalize()
+                .try_into()
+                .expect("GenericArray<_, 20> == [_; 20]");
 
-          //         tcp_stream.write_all(&msg).await?;
+            let piece_hashes = torrent.info.piece_hashes();
+            let piece_hash = piece_hashes
+                .iter()
+                .nth(piece_index)
+                .context("Piece index is valid")?;
 
-          //         // receive piece
+            assert_eq!(&hash, piece_hash);
 
-          //         let id = tcp_stream.read_u8().await?;
-          //         assert_eq!(id, b'7');
-          //         let mut block: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
-          //         tcp_stream.read_exact(&block).await?;
-          //     }
-          // }
+            tokio::fs::write(&outpath, piece_bytes)
+                .await
+                .context("write out downloaded piece")?;
+            println!("Piece {piece_index} downloaded to {}.", outpath.display());
+        }
     }
     Ok(())
 }
