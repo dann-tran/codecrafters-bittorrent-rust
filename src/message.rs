@@ -2,13 +2,13 @@ use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 #[repr(C)]
-pub struct RequestPayload {
+pub struct RequestMessagePayload {
     index: [u8; 4],
     begin: [u8; 4],
     length: [u8; 4],
 }
 
-impl RequestPayload {
+impl RequestMessagePayload {
     pub fn new(index: u32, begin: u32, length: u32) -> Self {
         Self {
             index: index.to_be_bytes(),
@@ -38,13 +38,13 @@ impl RequestPayload {
 }
 
 #[repr(C)]
-pub struct Piece<T: ?Sized = [u8]> {
+pub struct PieceMessagePayload<T: ?Sized = [u8]> {
     index: [u8; 4],
     begin: [u8; 4],
     block: T,
 }
 
-impl Piece {
+impl PieceMessagePayload {
     pub fn index(&self) -> u32 {
         u32::from_be_bytes(self.index)
     }
@@ -57,7 +57,7 @@ impl Piece {
         &self.block
     }
 
-    const PIECE_LEAD: usize = std::mem::size_of::<Piece<()>>();
+    const PIECE_LEAD: usize = std::mem::size_of::<PieceMessagePayload<()>>();
     pub fn ref_from_bytes(data: &[u8]) -> Option<&Self> {
         if data.len() < Self::PIECE_LEAD {
             return None;
@@ -69,7 +69,7 @@ impl Piece {
         // length of the fat pointer to the slice, which we do by slicing it. We can't slice it at
         // the front (as it would invalidate the ptr part of the fat pointer), so we slice it at
         // the back!
-        let piece = &data[..n - Self::PIECE_LEAD] as *const [u8] as *const Piece;
+        let piece = &data[..n - Self::PIECE_LEAD] as *const [u8] as *const PieceMessagePayload;
         // Safety: Piece is a POD with repr(c), _and_ the fat pointer data length is the length of
         // the trailing DST field (thanks to the PIECE_LEAD offset).
         Some(unsafe { &*piece })
