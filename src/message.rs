@@ -109,13 +109,11 @@ impl Decoder for MessageFramer {
             // Not enough data to read length marker.
             return Ok(None);
         }
-
         // Read length marker.
         let mut length_bytes = [0u8; 4];
 
         length_bytes.copy_from_slice(&src[..4]);
         let length = u32::from_be_bytes(length_bytes) as usize;
-
         if length == 0 {
             // this is a heartbeat message.
             // discard it.

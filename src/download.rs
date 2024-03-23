@@ -1,5 +1,6 @@
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 
@@ -9,11 +10,7 @@ use crate::message::{
 use crate::torrent::Torrent;
 use crate::utils::compute_hash;
 
-pub async fn download_piece(
-    torrent: &Torrent,
-    framed: &mut Framed<&mut TcpStream, MessageFramer>,
-    piece_index: usize,
-) -> anyhow::Result<Vec<u8>> {
+async fn init_download(framed: &mut Framed<&mut TcpStream, MessageFramer>) -> anyhow::Result<()> {
     let bitfield = framed
         .next()
         .await
@@ -38,6 +35,14 @@ pub async fn download_piece(
     assert_eq!(unchoke.tag, MessageTag::Unchoke);
     assert!(unchoke.payload.is_empty());
 
+    Ok(())
+}
+
+async fn _download_piece(
+    torrent: &Torrent,
+    framed: &mut Framed<&mut TcpStream, MessageFramer>,
+    piece_index: usize,
+) -> anyhow::Result<Vec<u8>> {
     let piece_size = if piece_index == torrent.info.pieces.chunks_exact(20).len() - 1 {
         let size = torrent.info.length % torrent.info.piece_length;
         if size == 0 {
@@ -48,6 +53,7 @@ pub async fn download_piece(
     } else {
         torrent.info.piece_length
     };
+
     let mut piece_bytes: Vec<u8> = Vec::with_capacity(piece_size);
     for (block_index, offset) in (0..piece_size).step_by(1 << 14).enumerate() {
         let block_size = std::cmp::min(&piece_size - offset, 1 << 14);
@@ -90,4 +96,30 @@ pub async fn download_piece(
     assert_eq!(&hash, piece_hash);
 
     Ok(piece_bytes)
+}
+
+pub async fn download_piece(
+    torrent: &Torrent,
+    framed: &mut Framed<&mut TcpStream, MessageFramer>,
+    piece_index: usize,
+    file: &mut tokio::fs::File,
+) -> anyhow::Result<()> {
+    init_download(framed).await?;
+    let bytes = _download_piece(torrent, framed, piece_index).await?;
+    file.write_all(&bytes).await?;
+    Ok(())
+}
+
+pub async fn download_file(
+    torrent: &Torrent,
+    framed: &mut Framed<&mut TcpStream, MessageFramer>,
+    file: &mut tokio::fs::File,
+) -> anyhow::Result<()> {
+    init_download(framed).await?;
+    for piece_index in 0..torrent.info.length.div_ceil(torrent.info.piece_length) {
+        let piece_bytes = _download_piece(&torrent, framed, piece_index).await?;
+        // file_bytes.extend(piece_bytes);
+        file.write_all(&piece_bytes).await?;
+    }
+    Ok(())
 }

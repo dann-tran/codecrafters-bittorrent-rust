@@ -2,8 +2,12 @@ use anyhow::Context;
 use clap::{arg, Parser, Subcommand};
 
 use bittorrent_starter_rust::{
-    decode::decode_bencoded_value, download::download_piece, handshake::perform_handshake,
-    message::MessageFramer, torrent::Torrent, tracker::request_tracker,
+    decode::decode_bencoded_value,
+    download::{download_file, download_piece},
+    handshake::perform_handshake,
+    message::MessageFramer,
+    torrent::Torrent,
+    tracker::request_tracker,
 };
 use std::path::PathBuf;
 use tokio::net::TcpStream;
@@ -105,12 +109,13 @@ async fn main() -> anyhow::Result<()> {
             let mut tcp_stream = TcpStream::connect(&peer_addr).await?;
 
             perform_handshake(&torrent, &mut tcp_stream).await?;
-            let mut framed = tokio_util::codec::Framed::new(&mut tcp_stream, MessageFramer);
-            let piece_bytes = download_piece(&torrent, &mut framed, piece_index).await?;
 
-            tokio::fs::write(&outpath, &piece_bytes)
+            let mut output_file = tokio::fs::File::create(&outpath)
                 .await
-                .context("write out downloaded piece")?;
+                .expect("create output file");
+            let mut framed = tokio_util::codec::Framed::new(&mut tcp_stream, MessageFramer);
+            download_piece(&torrent, &mut framed, piece_index, &mut output_file).await?;
+
             println!("Piece {piece_index} downloaded to {}.", outpath.display());
         }
         Command::Download { outpath, filepath } => {
@@ -123,17 +128,12 @@ async fn main() -> anyhow::Result<()> {
             let peer_addr = &peers.iter().nth(0).context("Get peer addr")?;
             let mut tcp_stream = TcpStream::connect(&peer_addr).await?;
 
-            let mut framed = tokio_util::codec::Framed::new(&mut tcp_stream, MessageFramer);
-            let mut file_bytes = Vec::with_capacity(torrent.info.piece_length);
-            for piece_index in 0..torrent.info.length.div_ceil(torrent.info.piece_length) {
-                eprintln!("Downloading piece {piece_index}");
-                let piece_bytes = download_piece(&torrent, &mut framed, piece_index).await?;
-                file_bytes.extend(piece_bytes);
-            }
-
-            tokio::fs::write(&outpath, &file_bytes)
+            perform_handshake(&torrent, &mut tcp_stream).await?;
+            let mut output_file = tokio::fs::File::create(&outpath)
                 .await
-                .context("write out downloaded file")?;
+                .expect("create output file");
+            let mut framed = tokio_util::codec::Framed::new(&mut tcp_stream, MessageFramer);
+            download_file(&torrent, &mut framed, &mut output_file).await?;
             println!(
                 "Downloaded {} to {}.",
                 filepath.display(),
